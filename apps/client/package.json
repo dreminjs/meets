@@ -1,0 +1,9 @@
+{
+  "name": "@meets/client",
+  "version": "0.0.1",
+  "private": true,
+  "dependencies": {
+    "mediasoup-client": "^3.17.1",
+    "socket.io-client": "^4.8.1"
+  }
+}
