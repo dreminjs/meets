@@ -1,231 +1,182 @@
-import { useEffect, useRef, useState, useCallback } from 'react';
-import { useParams, useNavigate } from 'react-router-dom';
-import { useMediaStream } from '../../model/hooks/useMediaStream';
-import { useSocket } from '../../model/hooks/useSocket';
-import { useWebRTC } from '../../model/hooks/useWebRTC';
-import { ConnectionInfo } from './ConnectionInfo';
-import { VideoPlayer } from './VideoPlayer';
+import { useEffect, useRef } from 'react';
 
 export const RoomPage = () => {
-  const { roomId } = useParams<{ roomId: string }>();
-  const navigate = useNavigate();
-
+  const localStreamRef = useRef<MediaStream | null>(null);
   const localVideoRef = useRef<HTMLVideoElement>(null);
   const remoteVideoRef = useRef<HTMLVideoElement>(null);
+  const localPeerConnectionRef = useRef<RTCPeerConnection | null>(null);
+  const remotePeerConnectionRef = useRef<RTCPeerConnection | null>(null);
 
-  const [isJoined, setIsJoined] = useState<boolean>(false);
-  const [isLoading, setIsLoading] = useState<boolean>(true);
-  const [hasLeft, setHasLeft] = useState<boolean>(false);
+  const pc1IceCandidatesRef = useRef<RTCIceCandidate[]>([]);
+  const pc2IceCandidatesRef = useRef<RTCIceCandidate[]>([]);
 
-  const { localStreamRef, initMedia, stopMedia } = useMediaStream();
-
-  const socket = useSocket();
-
-  const webRTC = useWebRTC({
-    localStream: localStreamRef.current,
-    socket: socket.socket,
-    roomId: roomId || '',
-  });
-
-  const handleLeaveRoom = useCallback(() => {
-    setHasLeft(true);
-
-    if (roomId) {
-      socket.leaveRoom(roomId);
-    }
-    webRTC.closeConnection();
-    socket.disconnect();
-    stopMedia();
-
-    navigate('/');
-  }, [navigate, roomId, socket, stopMedia, webRTC]);
+  const config: RTCConfiguration = {
+    iceServers: [
+      { urls: 'stun:stun.l.google.com:19302' },
+      { urls: 'stun:stun1.l.google.com:19302' },
+    ],
+  };
 
   useEffect(() => {
-    if (
-      webRTC.handleOffer &&
-      webRTC.handleAnswer &&
-      webRTC.handleIceCandidate &&
-      webRTC.createOffer
-    ) {
-      socket.updateHandlers({
-        onJoined: (data: { roomId: string; users: string[] }) => {
-          setIsJoined(true);
-          setIsLoading(false);
-          if (webRTC.createOffer) {
-            setTimeout(() => webRTC.createOffer(), 1000);
-          }
-        },
-        onUserJoined: (data: { userId: string; users: string[] }) => {
-          if (isJoined && webRTC.createOffer) {
-            webRTC.createOffer();
-          }
-        },
-        onUserLeft: (data: { userId: string; users: string[] }) => {
-          if (remoteVideoRef.current) {
-            remoteVideoRef.current.srcObject = null;
-          }
-        },
-        onOffer: webRTC.handleOffer,
-        onAnswer: webRTC.handleAnswer,
-        onIceCandidate: webRTC.handleIceCandidate,
-      });
-    }
-  }, [
-    webRTC.handleOffer,
-    webRTC.handleAnswer,
-    webRTC.handleIceCandidate,
-    webRTC.createOffer,
-    isJoined,
-    socket,
-    webRTC,
-  ]);
+    async function initMedia() {
+      try {
+        const stream = await navigator.mediaDevices.getUserMedia({
+          video: true,
+          audio: true,
+        });
 
-  useEffect(() => {
-    console.log(localStreamRef)
-    if (localStreamRef.current && localVideoRef.current) {
-      localVideoRef.current.srcObject = localStreamRef.current;
-    }
-  }, [localStreamRef]);
+        localStreamRef.current = stream;
 
-  useEffect(() => {
-    if (webRTC.remoteStreamRef.current && remoteVideoRef.current) {
-      remoteVideoRef.current.srcObject = webRTC.remoteStreamRef.current;
-    }
-  }, [webRTC.isConnected, webRTC.remoteStreamRef]);
+        if (localVideoRef.current) {
+          localVideoRef.current.srcObject = stream;
+        }
 
-  useEffect(() => {
-    const initializeRoom = async () => {
-      if (!roomId) {
-        return;
+        await initPeerConnection();
+      } catch (e) {
+        console.error(e);
       }
+    }
 
-      await initMedia();
+    async function initPeerConnection() {
+      const localStream = localStreamRef.current;
+      if (!localStream) return;
 
-      await socket.connect();
+      try {
+        const pc1 = new RTCPeerConnection(config);
+        const pc2 = new RTCPeerConnection(config);
 
-      await webRTC.initializePeerConnection();
+        localPeerConnectionRef.current = pc1;
+        remotePeerConnectionRef.current = pc2;
 
-      socket.joinRoom(roomId);
-    };
+        localStream.getTracks().forEach((track) => {
+          pc1.addTrack(track, localStream);
+        });
 
-    initializeRoom();
+        pc2.ontrack = (event) => {
+          console.log('✅ Получен удаленный поток');
+          if (remoteVideoRef.current && event.streams[0]) {
+            remoteVideoRef.current.srcObject = event.streams[0];
+          }
+        };
 
-    return () => {
-      if (!hasLeft) {
-        handleLeaveRoom();
+        pc1.onicecandidate = (event) => {
+          if (event.candidate) {
+            if (pc2.remoteDescription) {
+              pc2.addIceCandidate(event.candidate).catch(e => 
+                console.log('ICE candidate ошибка (нормально):', e)
+              );
+            } else {
+              pc1IceCandidatesRef.current.push(event.candidate);
+            }
+          }
+        };
+
+        pc2.onicecandidate = (event) => {
+          if (event.candidate) {
+            console.log('🧊 PC2 ICE candidate');
+            if (pc1.remoteDescription) {
+              pc1.addIceCandidate(event.candidate).catch(e => 
+                console.log('ICE candidate ошибка (нормально):', e)
+              );
+            } else {
+              pc2IceCandidatesRef.current.push(event.candidate);
+            }
+          }
+        };
+
+        const offer = await pc1.createOffer();
+        await pc1.setLocalDescription(offer);
+
+        await pc2.setRemoteDescription(offer);
+
+        for (const candidate of pc1IceCandidatesRef.current) {
+          await pc2.addIceCandidate(candidate).catch(e => console.log(e));
+        }
+        pc1IceCandidatesRef.current = [];
+
+        const answer = await pc2.createAnswer();
+        await pc2.setLocalDescription(answer);
+
+        await pc1.setRemoteDescription(answer);
+
+        for (const candidate of pc2IceCandidatesRef.current) {
+          await pc1.addIceCandidate(candidate).catch(e => console.log(e));
+        }
+        pc2IceCandidatesRef.current = [];
+
+
+      } catch (error) {
+        console.error(error);
       }
-    };
-  }, [handleLeaveRoom, hasLeft, initMedia, roomId, socket, webRTC]);
+    }
 
-  const handleCopyRoomId = (): void => {
-    if (roomId) {
-      navigator.clipboard.writeText(roomId);
+    initMedia();
+  }, []);
+
+  const stopAllTracks = () => {
+    if (localStreamRef.current) {
+      localStreamRef.current.getTracks().forEach((track) => track.stop());
+    }
+    if (localVideoRef.current) {
+      localVideoRef.current.srcObject = null;
+    }
+    if (remoteVideoRef.current) {
+      remoteVideoRef.current.srcObject = null;
     }
   };
 
-  if (!roomId) {
-    return <div>Invalid room ID</div>;
-  }
+  const closeConnection = () => {
+    if (localPeerConnectionRef.current) {
+      localPeerConnectionRef.current.close();
+      localPeerConnectionRef.current = null;
+    }
+    if (remotePeerConnectionRef.current) {
+      remotePeerConnectionRef.current.close();
+      remotePeerConnectionRef.current = null;
+    }
+    stopAllTracks();
+  };
+
+  useEffect(() => {
+    return () => {
+      closeConnection();
+    };
+  }, []);
 
   return (
-    <div className="min-h-screen bg-gray-900 p-6">
-      <div className="max-w-7xl mx-auto">
-        <div className="bg-gray-800 rounded-lg p-4 mb-6">
-          <div className="flex flex-col sm:flex-row justify-between items-center gap-4">
-            <div className="flex items-center space-x-4">
-              <h1 className="text-2xl font-bold text-white">Video Room</h1>
-              <div className="flex items-center space-x-2">
-                <span className="text-gray-300">Room ID:</span>
-                <span className="text-white font-mono bg-gray-700 px-3 py-1 rounded">
-                  {roomId}
-                </span>
-                <button
-                  onClick={handleCopyRoomId}
-                  className="text-gray-400 hover:text-white transition-colors"
-                  title="Copy Room ID"
-                >
-                  <svg
-                    className="w-5 h-5"
-                    fill="none"
-                    stroke="currentColor"
-                    viewBox="0 0 24 24"
-                  >
-                    <path
-                      strokeLinecap="round"
-                      strokeLinejoin="round"
-                      strokeWidth={2}
-                      d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z"
-                    />
-                  </svg>
-                </button>
-              </div>
-            </div>
-
-            <button
-              onClick={handleLeaveRoom}
-              className="bg-red-600 hover:bg-red-700 text-white px-6 py-2 rounded-lg font-semibold transition-colors flex items-center space-x-2"
-            >
-              <svg
-                className="w-5 h-5"
-                fill="none"
-                stroke="currentColor"
-                viewBox="0 0 24 24"
-              >
-                <path
-                  strokeLinecap="round"
-                  strokeLinejoin="round"
-                  strokeWidth={2}
-                  d="M17 16l4-4m0 0l-4-4m4 4H7m6 4v1a3 3 0 01-3 3H6a3 3 0 01-3-3V7a3 3 0 013-3h4a3 3 0 013 3v1"
-                />
-              </svg>
-              <span>Leave Room</span>
-            </button>
-          </div>
+    <div>
+      <div className='flex text-center'>
+        <div>
+          <h3>Local Video</h3>
+          <video
+            ref={localVideoRef}
+            autoPlay
+            muted
+            playsInline
+            style={{
+              border: '2px solid #007bff',
+              borderRadius: '10px',
+              width: '400px',
+              height: '300px',
+              transform: 'scaleX(-1)',
+            }}
+          />
         </div>
-
-        {isLoading ? (
-          <div className="flex items-center justify-center h-96">
-            <div className="text-center">
-              <div className="animate-spin rounded-full h-16 w-16 border-b-2 border-blue-500 mx-auto mb-4"></div>
-              <p className="text-white text-lg">Joining room...</p>
-              <p className="text-gray-400 text-sm mt-2">
-                Setting up your camera and connecting to peers
-              </p>
-            </div>
-          </div>
-        ) : (
-          <>
-            <div className="grid grid-cols-1 xl:grid-cols-2 gap-6 mb-6">
-              <VideoPlayer
-                videoRef={localVideoRef}
-                title={`You ${socket.peerId ? `(${socket.peerId})` : ''}`}
-                description="Local video stream"
-                isLocal={true}
-                isConnected={true}
-              />
-
-              <VideoPlayer
-                videoRef={remoteVideoRef}
-                title="Remote Peer"
-                description={
-                  webRTC.isConnected
-                    ? 'Connected'
-                    : 'Waiting for someone to join...'
-                }
-                isConnected={webRTC.isConnected}
-                showWaiting={true}
-              />
-            </div>
-
-            <ConnectionInfo
-              connectionState={webRTC.connectionState}
-              peerId={socket.peerId}
-              usersInRoom={socket.usersInRoom}
-              iceCandidates={webRTC.iceCandidates}
-              isConnected={webRTC.isConnected}
-            />
-          </>
-        )}
+        <div>
+          <h3>Remote Video</h3>
+          <video
+            ref={remoteVideoRef}
+            autoPlay
+            playsInline
+            style={{
+              border: '2px solid #28a745',
+              borderRadius: '10px',
+              width: '400px',
+              height: '300px',
+              transform: 'scaleX(-1)',
+            }}
+          />
+        </div>
       </div>
     </div>
   );

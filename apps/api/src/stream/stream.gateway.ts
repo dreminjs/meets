@@ -8,11 +8,15 @@ import {
 } from '@nestjs/websockets';
 import { Server, Socket } from 'socket.io';
 
+type RTCIceCandidate = any;
+
 @WebSocketGateway()
 export class StreamGateway implements OnGatewayConnection, OnGatewayDisconnect {
   private logger = new Logger(StreamGateway.name);
 
-  private rooms = new Map();
+  private rooms: Map<string, Set<string>> = new Map();
+
+  private users: Map<string, string> = new Map();
 
   handleDisconnect(client: Socket) {
     this.rooms.forEach((users, roomId) => {
@@ -30,7 +34,7 @@ export class StreamGateway implements OnGatewayConnection, OnGatewayDisconnect {
       }
     });
   }
-  
+
   handleConnection() {
     this.logger.log('connect');
   }
@@ -38,73 +42,94 @@ export class StreamGateway implements OnGatewayConnection, OnGatewayDisconnect {
   @WebSocketServer()
   server: Server | undefined;
 
-  @SubscribeMessage('join')
-  handleJoin(client: Socket, roomId: string) {
-    client.rooms.forEach((room) => {
-      if (room !== client.id) {
-        client.leave(room);
-      }
-    });
+  @SubscribeMessage('join-room')
+  handleJoin(
+    client: Socket,
+    { roomId, userId }: { roomId: string; userId: string }
+  ) {
+    this.leaveRoom(client);
+
+    client.join(roomId);
+
+    this.users.set(client.id, roomId);
 
     if (!this.rooms.has(roomId)) {
       this.rooms.set(roomId, new Set());
     }
 
-    const roomUsers = this.rooms.get(roomId);
-    roomUsers.add(client.id);
+    this.rooms.get(roomId)!.add(client.id);
 
-    this.server!.emit('joined', {
-      roomId,
-      users: Array.from(roomUsers),
-    });
+    client.to(roomId).emit('user-joined', { userId, socketId: client.id });
 
-    client.join(roomId);
+    const roomUsers = Array.from(this.rooms.get(roomId)!).map((socketId) => ({
+      socketId,
+      userId: 'user-' + socketId,
+    }));
 
-    client.to(roomId).emit('joined', {
-      userId: client.id,
-      users: Array.from(roomUsers),
-    });
+    client.emit('room-users', roomUsers);
   }
 
   @SubscribeMessage('offer')
-  handleOffer(client: Socket, payload: { room: string; offer: any }) {
-    client
-      .to(payload.room)
-      .emit('offer', { offer: payload.offer, from: client.id });
+  handleOffer(
+    client: Socket,
+    data: {
+      targetSocketId: string;
+      // RTCSessionDescriptionInit
+      offer: any;
+      roomId: string;
+    }
+  ) {
+    client.to(data.targetSocketId).emit('offer', {
+      offer: data.offer,
+      fromSocketId: client.id,
+    });
   }
 
   @SubscribeMessage('answer')
-  handleAnswer(client: Socket, payload: { room: string; answer: any }) {
-    client
-      .to(payload.room)
-      .emit('answer', { answer: payload.answer, from: client.id });
+  handleAnswer(
+    client: Socket,
+    data: {
+      targetSocketId: string;
+      // RTCSessionDescriptionInit
+      answer: any;
+    }
+  ) {
+    client.to(data.targetSocketId).emit('answer', {
+      answer: data.answer,
+      fromSocketId: client.id,
+    });
   }
 
   @SubscribeMessage('ice-candidate')
   handleIceCandidate(
     client: Socket,
-    payload: { room: string; candidate: any }
+    data: {
+      targetSocketId: string;
+      candidate: RTCIceCandidate;
+    }
   ) {
-    client
-      .to(payload.room)
-      .emit('ice-candidate', { candidate: payload.candidate, from: client.id });
+    client.to(data.targetSocketId).emit('ice-candidate', {
+      candidate: data.candidate,
+      fromSocketId: client.id,
+    });
   }
 
-  @SubscribeMessage('leave-room')
-  handleLeaveRoom(client: Socket, roomId: string) {
-    if (this.rooms.has(roomId)) {
-      const roomUsers = this.rooms.get(roomId);
-      roomUsers.delete(client.id);
+  private leaveRoom(client: Socket) {
+    const roomId = this.users.get(client.id);
+    if (roomId) {
+      client.leave(roomId);
+      this.users.delete(client.id);
 
-      if (roomUsers.size === 0) {
-        this.rooms.delete(roomId);
-      } else {
-        client.to(roomId).emit('user-left', {
-          userId: client.id,
-          users: Array.from(roomUsers),
-        });
+      const room = this.rooms.get(roomId);
+      if (room) {
+        room.delete(client.id);
+
+        client.to(roomId).emit('user-left', { socketId: client.id });
+
+        if (room.size === 0) {
+          this.rooms.delete(roomId);
+        }
       }
     }
-    client.leave(roomId);
   }
 }
