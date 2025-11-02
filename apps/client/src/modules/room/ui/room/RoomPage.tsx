@@ -12,10 +12,8 @@ export const RoomPage = () => {
   const [roomId, setRoomId] = useState<number | null>(null);
   const [joinRoomId, setJoinRoomId] = useState('');
 
-  // Используем ref для roomId, чтобы иметь доступ к актуальному значению в обработчиках
   const roomIdRef = useRef<number | null>(null);
 
-  // Обновляем ref при изменении roomId
   useEffect(() => {
     roomIdRef.current = roomId;
   }, [roomId]);
@@ -27,7 +25,6 @@ export const RoomPage = () => {
     ],
   };
 
-  // Функция для отправки сообщений через socket с актуальным roomId
   const emitWithRoomId = useCallback((event: string, data: any) => {
     const currentRoomId = roomIdRef.current;
     if (socketRef.current?.connected && currentRoomId) {
