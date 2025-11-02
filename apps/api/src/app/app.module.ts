@@ -1,9 +1,9 @@
 import { Module } from '@nestjs/common';
 import { AppController } from './app.controller';
-import { StreamModule } from '../stream/stream.module';
+import { SignalingModule} from '../stream/signaling.module';
 
 @Module({
-  imports: [StreamModule],
+  imports: [SignalingModule],
   controllers: [AppController],
 })
 export class AppModule {}
