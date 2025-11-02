@@ -116,11 +116,6 @@ export class SignalingGateway
     }
   }
 
-  // @SubscribeMessage("user-joined")
-  // handleUserJoined() {
-  //   this.logger.log("USER JOINED")
-  // }
-
   @SubscribeMessage('offer')
   handleOffer(
     @ConnectedSocket() client: Socket,
